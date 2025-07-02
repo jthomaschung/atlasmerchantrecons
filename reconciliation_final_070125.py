@@ -98,7 +98,7 @@ def process_wsr_file(wsr_file, store_number, processed_files, file_content, reco
     if file_base in processed_files: return None
     processed_files.add(file_base)
     try:
-        engine = 'openpyxl' if wsr_file.lower().endswith('.xlsx') else None
+        engine = 'openpyxl' if wsr_file.lower().endswith('.xlsx') else 'xlrd'
         wsr_data = pd.read_excel(io.BytesIO(file_content), sheet_name='Weekly Sales', header=None, engine=engine)
         file_store_num = str(wsr_data.iloc[3, 2]).lstrip('0').replace('#', '').strip()
         if file_store_num != store_number:
@@ -561,8 +561,19 @@ def process_files(recon_month_obj, merchant_file, wsr_zip_file, bank_file, settl
                     wsr_final_df.loc[idx, 'Status'] = status
         final_unmatched_source_df = remaining_source_after_n1[~remaining_source_after_n1.index.isin(used_source_2x2)]
         wsr_final_df['Outstanding_AR_Amount'] = np.where(wsr_final_df['Status'].str.contains("Matched|Reversed", na=False), 0, wsr_final_df['AR_Amount'])
+        
+        # --- Calculate Amex Fees (Post-Processing) ---
+        fee_condition = (
+            wsr_final_df['Status'].isin(['Matched with Settlement', 'Matched (Net of Fees)'])
+        )
+        wsr_final_df['Fee_Amount'] = np.where(
+            fee_condition, 
+            wsr_final_df['AR_Amount'] - wsr_final_df['Bank_Amount'], 
+            0
+        )
+        
         final_unmatched_source_df['Outstanding_AR_Amount'] = 0
-        final_df = pd.concat([wsr_final_df, final_unmatched_source_df], ignore_index=True)
+        final_df = pd.concat([wsr_final_df, final_unmatched_source_df], ignore_index=True).fillna({'Fee_Amount': 0})
 
         # --- Final Sorting for Auditability ---
         final_df['Sort_Date'] = final_df['WSR_Date'].fillna(final_df['Bank_Date'])
@@ -572,7 +583,7 @@ def process_files(recon_month_obj, merchant_file, wsr_zip_file, bank_file, settl
         final_df_sorted = final_df.sort_values(['Store', 'Sort_Priority', 'Sort_Date'], na_position='last')
         wsr_final_df_sorted = wsr_final_df.sort_values(['Store', 'Sort_Date'], na_position='first')
 
-        cols_order = ['Store', 'WSR_Date', 'Channel', 'Merchant_Type', 'Card_Type', 'Merchant_Number', 'AR_Amount', 'Outstanding_AR_Amount', 'Bank_Date', 'Bank_Amount', 'Status', 'Source', 'Bank_Reference', 'Bank_Description', 'Settlement_Amount', 'Settlement_Number', 'Match_Group_ID', 'WSR_File', 'WSR_Label']
+        cols_order = ['Store', 'WSR_Date', 'Channel', 'Merchant_Type', 'Card_Type', 'Merchant_Number', 'AR_Amount', 'Outstanding_AR_Amount', 'Bank_Date', 'Bank_Amount', 'Fee_Amount', 'Status', 'Source', 'Bank_Reference', 'Bank_Description', 'Settlement_Amount', 'Settlement_Number', 'Match_Group_ID', 'WSR_File', 'WSR_Label']
         
         final_df_final = final_df_sorted.reindex(columns=cols_order + [c for c in final_df_sorted.columns if c not in cols_order and c not in ['Sort_Date', 'Sort_Priority']]).reset_index(drop=True)
         wsr_final_df_final = wsr_final_df_sorted.reindex(columns=cols_order + [c for c in wsr_final_df_sorted.columns if c not in cols_order and c not in ['Sort_Date']]).reset_index(drop=True)
@@ -640,7 +651,7 @@ if st.session_state.processed:
     filtered_df = display_df.copy()
     for col, val in filters.items():
         if val: filtered_df = filtered_df[filtered_df[col].isin(val)]
-    st.dataframe(filtered_df)
+    st.dataframe(filtered_df.style.format({'AR_Amount': '${:,.2f}', 'Outstanding_AR_Amount': '${:,.2f}', 'Bank_Amount': '${:,.2f}', 'Fee_Amount': '${:,.2f}'}))
     st.subheader("Issues")
     if not st.session_state.audit_df.empty: st.write("Audit Issues"); st.dataframe(st.session_state.audit_df)
     if not st.session_state.wsr_error_df.empty: st.write("WSR Errors"); st.dataframe(st.session_state.wsr_error_df)
